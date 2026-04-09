@@ -72,7 +72,12 @@ std::vector<Point> RANSAC(const int& iter, const double& threshold, const std::v
         point_pairs.erase(point_pairs.begin() + index_pair);
         std::vector<Point> local_inliers;
         for (int j = 0; j < all_points.size(); j++) {
-            double curr_threshold = std::abs(line.A * all_points[j].x + line.B * all_points[j].y + line.C) / std::sqrt(line.A * line.A + line.B * line.B);
+            if (std::abs(line.B) < 1e-12) {
+                continue;
+            }
+            double curr_a = -line.A / line.B;
+            double curr_b = -line.C / line.B;
+            double curr_threshold = std::abs(all_points[j].y - (curr_a * all_points[j].x + curr_b));
             if (curr_threshold < threshold) {
                 local_inliers.push_back(all_points[j]);
             }
@@ -111,7 +116,8 @@ Line linear_regression(const std::vector<Point>& all_points, const int& iter, co
 void draw_plot(const std::string& name,
                const std::vector<Point>& points,
                double true_a, double true_b,
-               double found_a, double found_b) {
+               double found_a, double found_b,
+               double found_a_without_ransac, double found_b_without_ransac) {
     int width = 900;
     int height = 700;
     int margin = 60;
@@ -132,9 +138,11 @@ void draw_plot(const std::string& name,
     double y2_true = true_a * max_x + true_b;
     double y1_found = found_a * min_x + found_b;
     double y2_found = found_a * max_x + found_b;
+    double y1_found_without_ransac = found_a_without_ransac * min_x + found_b_without_ransac;
+    double y2_found_without_ransac = found_a_without_ransac * max_x + found_b_without_ransac;
 
-    min_y = std::min(min_y, std::min(y1_true, y1_found));
-    max_y = std::max(max_y, std::max(y2_true, y2_found));
+    min_y = std::min(min_y, std::min(y1_true, std::min(y1_found, y1_found_without_ransac)));
+    max_y = std::max(max_y, std::max(y2_true, std::max(y2_found, y2_found_without_ransac)));
 
     double dx = max_x - min_x;
     double dy = max_y - min_y;
@@ -162,17 +170,41 @@ void draw_plot(const std::string& name,
              cv::Scalar(0, 180, 0), 2);
 
     cv::line(img,
+             to_img(min_x, found_a_without_ransac * min_x + found_b_without_ransac),
+             to_img(max_x, found_a_without_ransac * max_x + found_b_without_ransac),
+             cv::Scalar(255, 0, 0), 2);
+
+    cv::line(img,
              to_img(min_x, found_a * min_x + found_b),
              to_img(max_x, found_a * max_x + found_b),
              cv::Scalar(0, 0, 255), 2);
 
     cv::putText(img, "green - true line", cv::Point(30, 30),
                 cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 180, 0), 2);
-    cv::putText(img, "red - found line", cv::Point(30, 60),
+    cv::putText(img, "blue - without RANSAC", cv::Point(30, 60),
+                cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255, 0, 0), 2);
+    cv::putText(img, "red - with RANSAC", cv::Point(30, 90),
                 cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 0, 255), 2);
 
     cv::imshow(name, img);
     cv::imwrite(name + ".png", img);
+}
+
+Line linear_regression_without_ransac(const std::vector<Point>& all_points) {
+    int n = all_points.size();
+    double ss_x = s_x(all_points);
+    double ss_y = s_y(all_points);
+    double ss_xx = s_xx(all_points);
+    double ss_xy = s_xy(all_points);
+    double ss_x2 = ss_x * ss_x;
+    double denom = n * ss_xx - ss_x2;
+    double a = (n * ss_xy - ss_x * ss_y) / denom;
+    double b = ((ss_xx * ss_y - ss_x * ss_xy)) / denom;
+    Line line;
+    line.A = a;
+    line.B = -1;
+    line.C = b;
+    return line;
 }
 
 int main() {
@@ -209,7 +241,7 @@ int main() {
         while (points.size() < test.n_inliers + test.n_outliers) {
             double x = dist_x(gen);
             double y = dist_out_y(gen);
-            double dist = std::abs(test.true_a * x - y + test.true_b) / std::sqrt(test.true_a * test.true_a + 1.0);
+            double dist = std::abs(y - (test.true_a * x + test.true_b));
             if (dist > 3.0 * test.noise_sigma) {
                 points.push_back({x, y});
             }
@@ -218,28 +250,26 @@ int main() {
         return points;
     };
 
-    std::vector<TestCase> tests = {
-        {"test_1",  1.5,  2.0, 24,  6, -10, 10, 0.25, -18, 18,  20, 0.7},
-        {"test_2", -0.8,  5.0, 40, 10, -12, 12, 0.35, -20, 20,  40, 1.0},
-        {"test_3",  0.3, -4.0, 60, 20, -20, 20, 0.45, -20, 20,  80, 1.2},
-        {"test_4",  2.2, -1.0, 45, 25,  -8,  8, 0.70, -25, 25, 100, 0.9}
-    };
+    TestCase test = {"test_1", 1.5, 2.0, 35, 10, -10, 10, 0.25, -18, 18, 40, 0.7};
 
-    for (int i = 0; i < tests.size(); i++) {
-        std::vector<Point> points = make_dataset(tests[i]);
-        Line result = linear_regression(points, tests[i].iter, tests[i].threshold);
+    std::vector<Point> points = make_dataset(test);
+    Line result = linear_regression(points, test.iter, test.threshold);
+    Line result_without_ransac = linear_regression_without_ransac(points);
 
-        double found_a = -result.A / result.B;
-        double found_b = -result.C / result.B;
-        draw_plot(tests[i].name, points, tests[i].true_a, tests[i].true_b, found_a, found_b);
+    double found_a = -result.A / result.B;
+    double found_b = -result.C / result.B;
+    double found_a_without_ransac = -result_without_ransac.A / result_without_ransac.B;
+    double found_b_without_ransac = -result_without_ransac.C / result_without_ransac.B;
 
-        std::cout << tests[i].name << '\n';
-        std::cout << "true line:    y = " << tests[i].true_a << " * x + " << tests[i].true_b << '\n';
-        std::cout << "found line:   y = " << found_a << " * x + " << found_b << '\n';
-        std::cout << "total points: " << points.size() << "\n\n";
-    }
+    draw_plot(test.name, points, test.true_a, test.true_b, found_a, found_b, found_a_without_ransac, found_b_without_ransac);
+
+    std::cout << test.name << '\n';
+    std::cout << "true line:             y = " << test.true_a << " * x + " << test.true_b << '\n';
+    std::cout << "found line with RANSAC:y = " << found_a << " * x + " << found_b << '\n';
+    std::cout << "found line without:    y = " << found_a_without_ransac << " * x + " << found_b_without_ransac << '\n';
+    std::cout << "total points: " << points.size() << "\n\n";
+
     cv::waitKey(0);
 
     return 0;
 }
-
