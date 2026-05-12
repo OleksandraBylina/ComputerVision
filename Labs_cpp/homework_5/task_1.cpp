@@ -2,48 +2,62 @@
 #include <opencv2/opencv.hpp>
 #include <cmath>
 
-struct FisheyeParams {
-    double fx;
-    double fy;
+struct TwistParams {
     double cx;
     double cy;
-    double k1;
-    double k2;
-    double k3;
-    double k4;
+    double maxRadius;
+    double strength;
 };
 
-double distortTheta(double theta, const FisheyeParams& p)
+cv::Point2d twistPoint(double x, double y, const TwistParams& p)
 {
-    double theta2 = theta * theta;
-    double theta4 = theta2 * theta2;
-    double theta6 = theta4 * theta2;
-    double theta8 = theta4 * theta4;
+    double dx = x - p.cx;
+    double dy = y - p.cy;
 
-    return theta * (1.0 + p.k1 * theta2 + p.k2 * theta4 + p.k3 * theta6 + p.k4 * theta8);
-}
+    double r = std::sqrt(dx * dx + dy * dy);
 
-double undistortTheta(double theta_d, const FisheyeParams& p)
-{
-    double theta = theta_d;
-
-    for (int i = 0; i < 10; i++)
+    if (r > p.maxRadius)
     {
-        double theta2 = theta * theta;
-        double theta4 = theta2 * theta2;
-        double theta6 = theta4 * theta2;
-        double theta8 = theta4 * theta4;
-
-        double f = theta * (1.0 + p.k1 * theta2 + p.k2 * theta4 + p.k3 * theta6 + p.k4 * theta8) - theta_d;
-        double df = 1.0 + 3.0 * p.k1 * theta2 + 5.0 * p.k2 * theta4 + 7.0 * p.k3 * theta6 + 9.0 * p.k4 * theta8;
-
-        theta = theta - f / df;
+        return cv::Point2d(x, y);
     }
 
-    return theta;
+    double factor = 1.0 - r / p.maxRadius;
+    double angle = p.strength * factor;
+
+    double cosA = std::cos(angle);
+    double sinA = std::sin(angle);
+
+    double x_d = p.cx + dx * cosA - dy * sinA;
+    double y_d = p.cy + dx * sinA + dy * cosA;
+
+    return cv::Point2d(x_d, y_d);
 }
 
-void buildDistortMap(const cv::Size& size, const FisheyeParams& p, cv::Mat& mapX, cv::Mat& mapY)
+cv::Point2d untwistPoint(double x_d, double y_d, const TwistParams& p)
+{
+    double dx = x_d - p.cx;
+    double dy = y_d - p.cy;
+
+    double r = std::sqrt(dx * dx + dy * dy);
+
+    if (r > p.maxRadius)
+    {
+        return cv::Point2d(x_d, y_d);
+    }
+
+    double factor = 1.0 - r / p.maxRadius;
+    double angle = -p.strength * factor;
+
+    double cosA = std::cos(angle);
+    double sinA = std::sin(angle);
+
+    double x = p.cx + dx * cosA - dy * sinA;
+    double y = p.cy + dx * sinA + dy * cosA;
+
+    return cv::Point2d(x, y);
+}
+
+void buildTwistDistortMap(const cv::Size& size, const TwistParams& p, cv::Mat& mapX, cv::Mat& mapY)
 {
     mapX = cv::Mat(size, CV_32FC1);
     mapY = cv::Mat(size, CV_32FC1);
@@ -52,35 +66,15 @@ void buildDistortMap(const cv::Size& size, const FisheyeParams& p, cv::Mat& mapX
     {
         for (int u = 0; u < size.width; u++)
         {
-            double x_d = (u - p.cx) / p.fx;
-            double y_d = (v - p.cy) / p.fy;
+            cv::Point2d source = untwistPoint(u, v, p);
 
-            double r_d = std::sqrt(x_d * x_d + y_d * y_d);
-
-            double x = x_d;
-            double y = y_d;
-
-            if (r_d > 1e-8)
-            {
-                double theta_d = r_d;
-                double theta = undistortTheta(theta_d, p);
-                double r = std::tan(theta);
-                double scale = r / r_d;
-
-                x = x_d * scale;
-                y = y_d * scale;
-            }
-
-            double srcU = p.fx * x + p.cx;
-            double srcV = p.fy * y + p.cy;
-
-            mapX.at<float>(v, u) = static_cast<float>(srcU);
-            mapY.at<float>(v, u) = static_cast<float>(srcV);
+            mapX.at<float>(v, u) = static_cast<float>(source.x);
+            mapY.at<float>(v, u) = static_cast<float>(source.y);
         }
     }
 }
 
-void buildUndistortMap(const cv::Size& size, const FisheyeParams& p, cv::Mat& mapX, cv::Mat& mapY)
+void buildTwistUndistortMap(const cv::Size& size, const TwistParams& p, cv::Mat& mapX, cv::Mat& mapY)
 {
     mapX = cv::Mat(size, CV_32FC1);
     mapY = cv::Mat(size, CV_32FC1);
@@ -89,29 +83,10 @@ void buildUndistortMap(const cv::Size& size, const FisheyeParams& p, cv::Mat& ma
     {
         for (int u = 0; u < size.width; u++)
         {
-            double x = (u - p.cx) / p.fx;
-            double y = (v - p.cy) / p.fy;
+            cv::Point2d source = twistPoint(u, v, p);
 
-            double r = std::sqrt(x * x + y * y);
-
-            double x_d = x;
-            double y_d = y;
-
-            if (r > 1e-8)
-            {
-                double theta = std::atan(r);
-                double theta_d = distortTheta(theta, p);
-                double scale = theta_d / r;
-
-                x_d = x * scale;
-                y_d = y * scale;
-            }
-
-            double srcU = p.fx * x_d + p.cx;
-            double srcV = p.fy * y_d + p.cy;
-
-            mapX.at<float>(v, u) = static_cast<float>(srcU);
-            mapY.at<float>(v, u) = static_cast<float>(srcV);
+            mapX.at<float>(v, u) = static_cast<float>(source.x);
+            mapY.at<float>(v, u) = static_cast<float>(source.y);
         }
     }
 }
@@ -128,39 +103,34 @@ int main()
         return 0;
     }
 
-    FisheyeParams params;
+    TwistParams params;
 
-    params.fx = image.cols * 0.8;
-    params.fy = image.cols * 0.8;
     params.cx = image.cols / 2.0;
     params.cy = image.rows / 2.0;
-
-    params.k1 = 0.25;
-    params.k2 = 0.05;
-    params.k3 = 0.0;
-    params.k4 = 0.0;
+    params.maxRadius = std::min(image.cols, image.rows) * 0.75;
+    params.strength = 2.2;
 
     cv::Mat distortMapX;
     cv::Mat distortMapY;
     cv::Mat undistortMapX;
     cv::Mat undistortMapY;
 
-    buildDistortMap(image.size(), params, distortMapX, distortMapY);
+    buildTwistDistortMap(image.size(), params, distortMapX, distortMapY);
 
     cv::Mat distorted;
-    cv::remap(image, distorted, distortMapX, distortMapY, cv::INTER_LINEAR, cv::BORDER_CONSTANT);
+    cv::remap(image, distorted, distortMapX, distortMapY, cv::INTER_LINEAR, cv::BORDER_REPLICATE);
 
-    buildUndistortMap(image.size(), params, undistortMapX, undistortMapY);
+    buildTwistUndistortMap(image.size(), params, undistortMapX, undistortMapY);
 
     cv::Mat restored;
-    cv::remap(distorted, restored, undistortMapX, undistortMapY, cv::INTER_LINEAR, cv::BORDER_CONSTANT);
+    cv::remap(distorted, restored, undistortMapX, undistortMapY, cv::INTER_LINEAR, cv::BORDER_REPLICATE);
 
     cv::imwrite("original.png", image);
-    cv::imwrite("distorted.png", distorted);
-    cv::imwrite("restored.png", restored);
+    cv::imwrite("twist_distorted.png", distorted);
+    cv::imwrite("twist_restored.png", restored);
 
     cv::imshow("Original", image);
-    cv::imshow("Distorted", distorted);
+    cv::imshow("Twist distorted", distorted);
     cv::imshow("Restored", restored);
 
     cv::waitKey(0);
